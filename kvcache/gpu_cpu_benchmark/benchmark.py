@@ -2,6 +2,7 @@ import time
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
 from gpu_cpu_benchmark import copy_dma, copy_custom_kernel
 
@@ -24,6 +25,11 @@ cpu_tensor = torch.zeros(
 )
 
 # test single direction transfer with various block sizes
+results = {
+    "GPU -> CPU": {"DMA": [], "Custom Kernel": []},
+    "CPU -> GPU": {"DMA": [], "Custom Kernel": []}
+}
+
 for block_size_kb in BLOCK_SIZES_IN_KB_TEST:
     print("Testing block size", block_size_kb, "KB\n")
 
@@ -35,8 +41,8 @@ for block_size_kb in BLOCK_SIZES_IN_KB_TEST:
     cpu_tensor_view = cpu_tensor.view(-1, block_size)
 
     transfer_directions = (
-        (gpu_tensor_view, cpu_tensor_view, torch.cuda.Stream()),
-        (cpu_tensor_view, gpu_tensor_view, torch.cuda.Stream()),
+        (gpu_tensor_view, cpu_tensor_view, torch.cuda.Stream(), "GPU -> CPU"),
+        (cpu_tensor_view, gpu_tensor_view, torch.cuda.Stream(), "CPU -> GPU"),
     )
 
     blocks_to_copy = np.linspace(
@@ -45,7 +51,7 @@ for block_size_kb in BLOCK_SIZES_IN_KB_TEST:
     src_to_dst = np.stack((blocks_to_copy, blocks_to_copy), axis=1)  # (i, i)
     src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-    for src_tensor, dst_tensor, stream in transfer_directions:
+    for src_tensor, dst_tensor, stream, direction_name in transfer_directions:
         print(src_tensor.device, "->", dst_tensor.device)
         for copy_function in (copy_dma, copy_custom_kernel):
             start_time = time.perf_counter()
@@ -55,10 +61,29 @@ for block_size_kb in BLOCK_SIZES_IN_KB_TEST:
             total_time = time.perf_counter() - start_time
             throughput_gb = (bytes_copied / total_time) / (1 << 30)
             print(f"{copy_function.__name__:20}{throughput_gb:8.3f} GB/s")
+
+            func_name = "DMA" if "dma" in copy_function.__name__ else "Custom Kernel"
+            results[direction_name][func_name].append(throughput_gb)
         print()
     print()
 
+# Plotting
+for direction, data in results.items():
+    plt.figure()
+    plt.plot(BLOCK_SIZES_IN_KB_TEST, data["DMA"], label="DMA")
+    plt.plot(BLOCK_SIZES_IN_KB_TEST, data["Custom Kernel"], label="Custom Kernel")
+    plt.xlabel("Block Size (KB)")
+    plt.xscale("log", base=2)
+    plt.ylabel("Throughput (GB/s)")
+    plt.title(f"Throughput with Block Size ({direction})")
+    plt.legend()
+    plt.grid(True)
+    filename = f"{direction.replace(' -> ', '_to_').lower()}.svg"
+    plt.savefig(filename)
+    print(f"Saved plot to {filename}")
+
 # test concurrent transfers
+'''
 
 gpu_tensor_view = gpu_tensor.view(-1, BLOCK_SIZE)
 cpu_tensor_view = cpu_tensor.view(-1, BLOCK_SIZE)
@@ -118,3 +143,5 @@ for copy_functions in copy_functions_tuples:
         throughput_gb = (bytes_copied / total_time) / (1 << 30)
         print(f"GPU->CPU {percent}%: {throughput_gb:8.3f} GB/s")
     print()
+
+'''
