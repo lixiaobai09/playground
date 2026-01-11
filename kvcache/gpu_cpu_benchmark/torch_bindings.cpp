@@ -5,5 +5,7 @@
 
 PYBIND11_MODULE(gpu_cpu_benchmark, m) {
   m.def("copy_dma", &copy_dma);
-  m.def("copy_custom_kernel", &copy_custom_kernel);
+  m.def("copy_custom_kernel", &copy_custom_kernel, pybind11::arg("src"),
+        pybind11::arg("dst"), pybind11::arg("block_mapping"),
+        pybind11::arg("use_vec") = false);
 }

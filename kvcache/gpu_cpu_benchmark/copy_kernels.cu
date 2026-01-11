@@ -1,3 +1,5 @@
+#include <cstdint>
+#include <sys/cdefs.h>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -60,9 +62,10 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
   }
 }
 
+template<typename DType>
 __global__ void copy_kernel(
-    ulonglong2* __restrict__ src_ptr,
-    ulonglong2* __restrict__ dst_ptr,
+    DType* __restrict__ src_ptr,
+    DType* __restrict__ dst_ptr,
     const int64_t* __restrict__ block_mapping,
     const int words_per_block){
   const int block_id = blockIdx.x;
@@ -71,16 +74,33 @@ __global__ void copy_kernel(
 
   const int64_t src_block_number = block_mapping[2 * block_id];
   const int64_t dst_block_number = block_mapping[2 * block_id + 1];
-  ulonglong2* src = src_ptr + src_block_number * words_per_block;
-  ulonglong2* dst = dst_ptr + dst_block_number * words_per_block;
+  DType* src = src_ptr + src_block_number * words_per_block;
+  DType* dst = dst_ptr + dst_block_number * words_per_block;
 
   for (int i = tid; i < words_per_block; i += num_threads) {
     dst[i] = src[i];
   }
 }
 
+template<typename DType>
+void issue_kernel_copy(DType* __restrict__ src_ptr,
+                       DType* __restrict__ dst_prt,
+                       const int64_t* __restrict__ block_mapping,
+                       const int64_t block_size_bytes,
+                       const int num_blocks,
+                       const cudaStream_t stream
+                      ) {
+  const int words_per_block = block_size_bytes / sizeof(DType);
+  const dim3 grid(num_blocks);
+  const dim3 block(std::min(words_per_block, 128));
+  copy_kernel<<<grid, block, 0, stream>>>(
+    src_ptr, dst_prt, block_mapping, words_per_block);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void copy_custom_kernel(torch::Tensor& src, torch::Tensor& dst,
-                        const torch::Tensor& block_mapping) {
+                        const torch::Tensor& block_mapping,
+                        const bool use_vec = false) {
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
   const at::cuda::OptionalCUDAGuard device_guard(
@@ -88,21 +108,30 @@ void copy_custom_kernel(torch::Tensor& src, torch::Tensor& dst,
 	  
   int num_blocks = block_mapping.size(0);
   const int64_t block_size_bytes = src.element_size() * src.stride(0);
-  int words_per_block = block_size_bytes / sizeof(ulonglong2);
 
-  ulonglong2* src_ptr = get_kernel_ptr<ulonglong2, torch::Tensor>(src);
-  ulonglong2* dst_ptr = get_kernel_ptr<ulonglong2, torch::Tensor>(dst);
   const int64_t* block_mapping_ptr =
       get_kernel_ptr<const int64_t, const torch::Tensor>(block_mapping.cuda());
-
-  dim3 grid(num_blocks);
-  dim3 block(std::min(words_per_block, 128));
+  void* src_ptr = get_kernel_ptr<void, torch::Tensor>(src);
+  void* dst_ptr = get_kernel_ptr<void, torch::Tensor>(dst);
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  copy_kernel
-        <<<grid, block, 0, stream>>>(src_ptr, dst_ptr,
-                                     block_mapping_ptr,
-                                     words_per_block);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (use_vec) {
+    issue_kernel_copy<int4>(
+      reinterpret_cast<int4*>(src_ptr),
+      reinterpret_cast<int4*>(dst_ptr),
+      block_mapping_ptr,
+      block_size_bytes,
+      num_blocks,
+      stream);
+  } else {
+    issue_kernel_copy<ulonglong2>(
+      reinterpret_cast<ulonglong2*>(src_ptr),
+      reinterpret_cast<ulonglong2*>(dst_ptr),
+      block_mapping_ptr,
+      block_size_bytes,
+      num_blocks,
+      stream);
+  }
+
 }
